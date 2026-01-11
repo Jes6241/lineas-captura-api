@@ -23,7 +23,38 @@ router.post('/generar', async (req, res) => {
       });
     }
 
-    const codigo = generarCodigoLinea();
+    // Generar código único con verificación
+    let codigo;
+    let intentos = 0;
+    const maxIntentos = 5;
+
+    if (supabase) {
+      while (intentos < maxIntentos) {
+        codigo = generarCodigoLinea();
+        
+        // Verificar si ya existe
+        const { data: existe } = await supabase
+          .from('lineas_captura')
+          .select('codigo')
+          .eq('codigo', codigo)
+          .single();
+        
+        if (!existe) {
+          break; // Código único encontrado
+        }
+        intentos++;
+      }
+
+      if (intentos >= maxIntentos) {
+        return res.status(500).json({ 
+          success: false, 
+          error: 'No se pudo generar código único después de múltiples intentos' 
+        });
+      }
+    } else {
+      codigo = generarCodigoLinea();
+    }
+
     const fecha_vencimiento = calcularFechaVencimiento(15);
     const fecha_generacion = new Date().toISOString();
 
