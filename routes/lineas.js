@@ -4,23 +4,47 @@ const supabase = require('../config/supabase');
 const { 
   generarCodigoLinea, 
   validarLinea, 
-  calcularFechaVencimiento 
+  calcularFechaVencimiento,
+  formatearLineaCaptura,
+  desglosarLinea
 } = require('../services/generador');
 
 /**
  * POST /api/lineas/generar
  * Genera una nueva línea de captura
- * Body: { monto, concepto, referencia_externa? }
+ * Body: { 
+ *   monto: number (requerido),
+ *   concepto?: string (código o descripción),
+ *   referencia_externa?: string (placa, folio, etc),
+ *   entidad?: string (código de entidad, default '09' = CDMX)
+ * }
  */
 router.post('/generar', async (req, res) => {
   try {
-    const { monto, concepto, referencia_externa } = req.body;
+    const { monto, concepto, referencia_externa, entidad } = req.body;
 
     if (!monto || monto <= 0) {
       return res.status(400).json({ 
         success: false, 
         error: 'El monto debe ser mayor a 0' 
       });
+    }
+
+    // Mapear conceptos a códigos
+    const conceptosCodigos = {
+      'multa': '01',
+      'multa tránsito': '01',
+      'multa transito': '01',
+      'tenencia': '02',
+      'refrendo': '03',
+      'predial': '04'
+    };
+
+    // Determinar código de concepto
+    let codigoConcepto = '01'; // Default: multa tránsito
+    if (concepto) {
+      const conceptoLower = concepto.toLowerCase();
+      codigoConcepto = conceptosCodigos[conceptoLower] || concepto.slice(0, 2).padStart(2, '0');
     }
 
     // Generar código único con verificación
@@ -30,7 +54,13 @@ router.post('/generar', async (req, res) => {
 
     if (supabase) {
       while (intentos < maxIntentos) {
-        codigo = generarCodigoLinea();
+        codigo = generarCodigoLinea({
+          entidad: entidad || '09',
+          concepto: codigoConcepto,
+          referencia: referencia_externa,
+          monto: parseFloat(monto),
+          diasVigencia: 15
+        });
         
         // Verificar si ya existe
         const { data: existe } = await supabase
@@ -52,14 +82,24 @@ router.post('/generar', async (req, res) => {
         });
       }
     } else {
-      codigo = generarCodigoLinea();
+      codigo = generarCodigoLinea({
+        entidad: entidad || '09',
+        concepto: codigoConcepto,
+        referencia: referencia_externa,
+        monto: parseFloat(monto),
+        diasVigencia: 15
+      });
     }
 
     const fecha_vencimiento = calcularFechaVencimiento(15);
     const fecha_generacion = new Date().toISOString();
 
+    // Desglosar la línea para obtener información detallada
+    const desglose = desglosarLinea(codigo);
+    
     const lineaCaptura = {
       codigo,
+      codigo_formateado: formatearLineaCaptura(codigo),
       monto: parseFloat(monto),
       concepto: concepto || 'Pago de multa de tránsito',
       referencia_externa: referencia_externa || null,
@@ -67,14 +107,25 @@ router.post('/generar', async (req, res) => {
       fecha_vencimiento,
       estado: 'disponible', // disponible, usada, vencida, cancelada
       usado_por: null,
-      fecha_uso: null
+      fecha_uso: null,
+      desglose: desglose
     };
 
     // Guardar en base de datos si está configurada
     if (supabase) {
       const { data, error } = await supabase
         .from('lineas_captura')
-        .insert([lineaCaptura])
+        .insert([{
+          codigo,
+          monto: parseFloat(monto),
+          concepto: concepto || 'Pago de multa de tránsito',
+          referencia_externa: referencia_externa || null,
+          fecha_generacion,
+          fecha_vencimiento,
+          estado: 'disponible',
+          usado_por: null,
+          fecha_uso: null
+        }])
         .select()
         .single();
 
@@ -86,7 +137,15 @@ router.post('/generar', async (req, res) => {
         });
       }
 
-      return res.json({ success: true, linea: data });
+      // Agregar información formateada a la respuesta
+      return res.json({ 
+        success: true, 
+        linea: {
+          ...data,
+          codigo_formateado: formatearLineaCaptura(data.codigo),
+          desglose: desglosarLinea(data.codigo)
+        }
+      });
     }
 
     // Modo sin base de datos (pruebas)
